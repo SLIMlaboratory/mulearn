@@ -30,6 +30,14 @@ except ModuleNotFoundError:
     gurobi_ok = False
 
 try:
+    import clarabel
+    from scipy import sparse
+
+    clarabel_ok = True
+except ModuleNotFoundError:
+    clarabel_ok = False
+
+try:
     import os
 
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -51,6 +59,32 @@ except ModuleNotFoundError:
     logger.warning('tqdm not available')
     tqdm_ok = False
 
+
+
+def nearest_psd(k, rtol=1e-8):
+    """Symmetrize a Gram matrix and remove its negative eigenvalues when
+    they are due to rounding.
+
+    Gram matrices of positive semidefinite kernels can have slightly negative
+    eigenvalues because of rounding (e.g., for Gaussian kernels with large
+    sigma). Solvers such as gurobi would then regard the problem as nonconvex
+    and resort to a much slower global optimization. The spectrum is thus
+    shifted when its negative part is below `rtol` times the largest
+    eigenvalue; otherwise (e.g., for the hyperbolic kernel, which is not
+    positive semidefinite) the matrix is only symmetrized.
+
+    :returns: tuple -- the matrix and a flag telling whether it is positive
+      semidefinite."""
+
+    k = np.asarray(k, dtype=float)
+    k = (k + k.T) / 2
+    eigenvalues = np.linalg.eigvalsh(k)
+    smallest, largest = eigenvalues[0], max(abs(eigenvalues[-1]), 1e-300)
+    if smallest >= 0:
+        return k, True
+    if -smallest <= rtol * largest:
+        return k + (-smallest + 1e-12 * largest) * np.eye(len(k)), True
+    return k, False
 
 
 class Solver:
@@ -113,11 +147,13 @@ class GurobiSolver(Solver):
 
     default_values = {"time_limit": 10 * 60,
                       "adjustment": 0,
-                      "initial_values": None}
+                      "initial_values": None,
+                      "threads": 0}
 
     def __init__(self, time_limit=default_values['time_limit'],
                  adjustment=default_values['adjustment'],
-                 initial_values=default_values['initial_values']):
+                 initial_values=default_values['initial_values'],
+                 threads=default_values['threads']):
         """
         Build an object of type GurobiSolver.
 
@@ -131,10 +167,15 @@ class GurobiSolver(Solver):
         :param initial_values: Initial values for variables of the optimization
           problem, defaults to None.
         :type initial_values: iterable of floats or None
+        :param threads: Number of threads used by gurobi, defaults to 0
+          (automatic choice). Set it to 1 when several problems are solved
+          in parallel processes.
+        :type threads: int
         """
         self.time_limit = time_limit
         self.adjustment = adjustment
         self.initial_values = initial_values
+        self.threads = threads
 
 
     def solve_problem(self, xs, mus, c, k):
@@ -161,13 +202,15 @@ class GurobiSolver(Solver):
                 raise ValueError('gurobi not available')
     
             m = len(xs)
-    
+            k, _ = nearest_psd(k)
+
             with Env(empty=True) as env:
                 env.setParam('OutputFlag', 0)
                 env.start()
                 with Model('mulearn', env=env) as model:
                     model.setParam('OutputFlag', 0)
                     model.setParam('TimeLimit', self.time_limit)
+                    model.setParam('Threads', self.threads)
                     #model.setParam('NonConvex', 2)
 
                     if c < np.inf:
@@ -252,6 +295,72 @@ class GurobiSolver(Solver):
         return f"{self.__class__.__name__}({', '.join(args)})"
 
 
+
+
+class ClarabelSolver(Solver):
+    """Solver based on Clarabel, an open source interior point solver.
+
+    Clarabel (https://clarabel.org, Apache 2.0 license) is installed via the
+    clarabel package and does not require any license key.
+    """
+
+    default_values = {"tol": 1e-8, "max_iter": 200}
+
+    def __init__(self, tol=default_values['tol'],
+                 max_iter=default_values['max_iter']):
+        """Build an object of type ClarabelSolver.
+
+        :param tol: Tolerance on the duality gap and on the feasibility of
+          the solution, defaults to 1e-8.
+        :type tol: float
+        :param max_iter: Maximum number of interior point iterations,
+          defaults to 200.
+        :type max_iter: int
+        """
+        self.tol = tol
+        self.max_iter = max_iter
+
+    def solve_problem(self, xs, mus, c, k):
+        """Minimize $\\chi^\\top K \\chi - \\mathrm{diag}(K)^\\top \\chi$
+        subject to $\\sum_i \\chi_i = 1$ and
+        $-c(1 - \\mu_i) \\leq \\chi_i \\leq c \\mu_i$.
+
+        :raises: ValueError if clarabel is not available, RuntimeError if the
+          problem could not be solved."""
+
+        if not clarabel_ok:
+            raise ValueError('clarabel not available')
+
+        n = len(k)
+        k_psd, is_psd = nearest_psd(k)
+        if not is_psd:
+            raise ValueError('the Gram matrix is not positive semidefinite '
+                             '(use GurobiSolver for nonconvex problems)')
+        P = sparse.csc_matrix(np.triu(2 * k_psd))
+        q = -np.diag(k).astype(float)
+        # equality constraint, then upper and lower bounds as  A x + s = b,
+        # with s in the zero cone and in the nonnegative orthant
+        A = sparse.vstack([sparse.csc_matrix(np.ones((1, n))),
+                           sparse.eye(n), -sparse.eye(n)]).tocsc()
+        b = np.concatenate([[1], c * mus, c * (1 - mus)])
+        cones = [clarabel.ZeroConeT(1), clarabel.NonnegativeConeT(2 * n)]
+
+        settings = clarabel.DefaultSettings()
+        settings.verbose = False
+        settings.max_iter = self.max_iter
+        settings.tol_gap_abs = settings.tol_gap_rel = self.tol
+        settings.tol_feas = self.tol
+
+        solution = clarabel.DefaultSolver(P, q, A, b, cones, settings).solve()
+        if solution.status not in (clarabel.SolverStatus.Solved,
+                                   clarabel.SolverStatus.AlmostSolved):
+            raise RuntimeError(f'clarabel: {solution.status}')
+        return np.array(solution.x)
+
+    def __repr__(self):
+        args = [f"{a}={getattr(self, a)}" for a in self.default_values
+                if getattr(self, a) != self.default_values[a]]
+        return f"{self.__class__.__name__}({', '.join(args)})"
 
 
 class TensorFlowSolver(Solver):

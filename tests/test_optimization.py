@@ -3,7 +3,8 @@ import numpy as np
 import unittest
 
 from mulearn import FuzzyInductor
-from mulearn.optimization import GurobiSolver
+from mulearn.kernel import GaussianKernel
+from mulearn.optimization import ClarabelSolver, GurobiSolver, nearest_psd
 
 
 class TestGurobiSolver(unittest.TestCase):
@@ -96,3 +97,49 @@ class TestGurobiSolver(unittest.TestCase):
 if __name__ == '__main__':
     unittest.main()
    
+
+class TestClarabelSolver(unittest.TestCase):
+
+    def _problem(self, seed, n=40, sigma=1.):
+        rng = np.random.default_rng(seed)
+        X = rng.normal(size=(n, 2))
+        mu = np.clip(rng.uniform(-.3, 1.3, n), 0, 1)
+        K = np.array([GaussianKernel(sigma).compute(x, X) for x in X])
+        return X, mu, K
+
+    def test_same_optimum_as_gurobi(self):
+        objective = lambda chi, K: chi @ K @ chi - np.diag(K) @ chi
+        for seed, sigma in enumerate([.1, 1, 10]):
+            X, mu, K = self._problem(seed, sigma=sigma)
+            c = 2 / mu.sum()
+            chi_c = np.array(ClarabelSolver().solve(X, mu, c, K))
+            chi_g = np.array(GurobiSolver().solve(X, mu, c, K))
+            self.assertAlmostEqual(objective(chi_c, K), objective(chi_g, K),
+                                   places=6)
+            self.assertAlmostEqual(chi_c.sum(), 1)
+
+    def test_infeasible(self):
+        X, mu, K = self._problem(0)
+        with self.assertRaises(RuntimeError):
+            ClarabelSolver().solve(X, mu, .5 / mu.sum(), K)
+
+    def test_inductor(self):
+        X, mu, _ = self._problem(1)
+        fi = FuzzyInductor(c=1, solver=ClarabelSolver()).fit(X, mu)
+        fg = FuzzyInductor(c=1, solver=GurobiSolver()).fit(X, mu)
+        np.testing.assert_allclose(fi.predict(X), fg.predict(X), atol=1e-4)
+
+    def test_nearest_psd(self):
+        _, _, K = self._problem(2, sigma=10)
+        K_psd, is_psd = nearest_psd(K)
+        self.assertTrue(is_psd)
+        self.assertGreaterEqual(np.linalg.eigvalsh(K_psd)[0], 0)
+        np.testing.assert_allclose(K_psd, K, atol=1e-10)
+
+    def test_not_psd(self):
+        K = np.array([[1., 2], [2, 1]])
+        K_out, is_psd = nearest_psd(K)
+        self.assertFalse(is_psd)
+        np.testing.assert_array_equal(K_out, K)
+        with self.assertRaises(ValueError):
+            ClarabelSolver().solve(np.zeros((2, 1)), np.array([1., 1]), 1, K)
