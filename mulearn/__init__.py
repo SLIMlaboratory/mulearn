@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore", category=OptimizeWarning)
 warnings.filterwarnings("ignore", category=FitFailedWarning)
 
 
-class FuzzyInductor(BaseEstimator, RegressorMixin):
+class FuzzyInductor(RegressorMixin, BaseEstimator):
     """FuzzyInductor class."""
 
     def __init__(self,
@@ -52,10 +52,6 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
         self.fuzzifier = fuzzifier
         self.solver = solver
         self.random_state = random_state
-        self.estimated_membership_ = None
-        self.chis_ = None
-        self.gram_ = None
-        self.fixed_term_ = None
 
     def __repr__(self, **kwargs):
         return f"FuzzyInductor(c={self.c}, k={self.k}, f={self.fuzzifier}, " \
@@ -63,15 +59,16 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
     
     def __eq__(self, other):
         """Check equality w.r.t. other objects."""
-        equal = (type(self) is type(other) and \
-                 self.c == other.c and self.k == other.k and \
-                self.fuzzifier == other.fuzzifier)
-        if 'chis_' in self.__dict__:
-            if 'chis_' not in other.__dict__:
-                return False
-            else:
-                return equal and (self.chis_ == other.chis_)
-    
+        if type(self) is not type(other):
+            return False
+        equal = (self.c == other.c and self.k == other.k and
+                 self.fuzzifier == other.fuzzifier)
+        if hasattr(self, 'chis_') != hasattr(other, 'chis_'):
+            return False
+        if hasattr(self, 'chis_'):
+            return equal and np.array_equal(self.chis_, other.chis_)
+        return equal
+
     def x_to_sq_dist(self, X_new):
         X_new = np.array(X_new)
         t1 = self.k.compute(X_new, X_new)
@@ -104,6 +101,11 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
         for e in y:
             if e < 0 or e > 1:
                 raise ValueError("`y` values should belong to [0, 1]")
+
+        if self.c * np.sum(y) < 1:
+            raise ValueError("the learning problem is infeasible, as "
+                             f"c * sum(y) = {self.c * np.sum(y)} < 1: set c "
+                             f"to at least {1 / np.sum(y)}")
             
         self.random_state = check_random_state(self.random_state)
 
@@ -111,8 +113,6 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
 
         if warm_start:
             check_is_fitted(self, ["chis_"])
-            if self.chis_ is None:
-                raise NotFittedError("chis variable are set to None")
             self.solver.initial_values = self.chis_
 
         if type(self.k) is kernel.PrecomputedKernel:
@@ -127,19 +127,34 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
                         if -self.c * (1 - mu) < chi < self.c * mu]
         
         self.fixed_term_ = np.array(self.chis_).dot(self.gram_.dot(self.chis_))
-        chi_sq_radius = list(self.x_to_sq_dist(X[chi_SV_index]))
+        sq_dist = self.x_to_sq_dist(X)
 
-        if len(chi_sq_radius) == 0:
-            self.estimated_membership_ = None
-            self.chis_ = None
-            logger.warning('No support vectors found')
-            return self
-        
-        self.fuzzifier.sq_radius_05 = np.mean(chi_sq_radius)
-        self.fuzzifier.fit(self.x_to_sq_dist(X), y,
-                           np.mean(chi_sq_radius))
-                        
+        if chi_SV_index:
+            sq_radius = np.mean(sq_dist[chi_SV_index])
+        else:
+            logger.warning('No support vectors found, squared radius '
+                           'obtained through the pinball loss')
+            sq_radius = self._pinball_sq_radius(sq_dist, y)
+
+        self.fuzzifier.sq_radius_05 = sq_radius
+        self.fuzzifier.fit(sq_dist, y, sq_radius)
+
         return self
+
+    def _pinball_sq_radius(self, sq_dist, y):
+        r"""Compute the squared radius when there are no support vectors.
+
+        The squared radius minimizes the convex, piecewise linear function
+        $r \mapsto r + c \sum_i \ell_{\mu_i}(R^2(x_i) - r)$, where $\ell_\mu$
+        is the pinball loss, hence its minimum is attained at one of the
+        squared distances of the training points."""
+
+        def objective(r):
+            t = sq_dist - r
+            return r + self.c * np.sum(y * np.maximum(t, 0) +
+                                       (1 - y) * np.maximum(-t, 0))
+
+        return min(sq_dist, key=objective)
 
     def decision_function(self, X):
         r"""Compute predictions for the membership function.
@@ -149,7 +164,7 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
           same length
         :returns: array of float -- the predictions for each value in `X`.
         """
-        check_is_fitted(self, ['chis_', 'estimated_membership_'])
+        check_is_fitted(self, ['chis_'])
         X = check_array(X)
         return self.fuzzifier.get_membership(self.x_to_sq_dist(X))
 
@@ -168,7 +183,7 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
           `None` and not included in $[0, 1]$.
         :returns: array of int -- the predictions for each value in `X`.
         """
-        check_is_fitted(self, ['chis_', 'estimated_membership_'])
+        check_is_fitted(self, ['chis_'])
         X = check_array(X)
         mus = self.decision_function(X)
         if alpha is None:
@@ -193,14 +208,10 @@ class FuzzyInductor(BaseEstimator, RegressorMixin):
         :returns: `float` -- opposite of MSE between the predictions for the
           elements in `X` w.r.t. the labels in `y`.
         """
-        check_X_y(X, y)
+        X, y = check_X_y(X, y)
+        return -np.mean((self.decision_function(X) - y) ** 2)
 
-        if self.estimated_membership_ is None:
-            return -np.inf
-        else:
-            return -np.mean((self.decision_function(X) - y) ** 2)
-        
     def get_profile(self):
-      check_is_fitted(self, ['chis_', 'estimated_membership_'])
+      check_is_fitted(self, ['chis_'])
       return self.fuzzifier.get_profile(self.x_to_sq_dist(self.X_))
 

@@ -5,6 +5,7 @@ import multiprocessing as mp
 import pickle
 import time
 import unittest
+from unittest import mock
 import warnings
 
 from joblib import Parallel, delayed
@@ -13,9 +14,11 @@ from sklearn.datasets import load_iris
 import sklearn.metrics as metrics
 from sklearn.model_selection import StratifiedKFold, GridSearchCV
 from sklearn.model_selection import cross_val_score
+from sklearn.base import is_regressor
+from sklearn.exceptions import NotFittedError
 
 from mulearn import FuzzyInductor
-from mulearn.fuzzifier import ExponentialFuzzifier
+from mulearn.fuzzifier import CrispFuzzifier, ExponentialFuzzifier
 from mulearn.kernel import LinearKernel, PolynomialKernel, GaussianKernel
 from mulearn.kernel import HyperbolicKernel
 
@@ -106,6 +109,57 @@ class TestFuzzyInductor(unittest.TestCase):
         y[y==2] = 0
         self.y = y
 
+    def test_is_regressor(self):
+        self.assertTrue(is_regressor(FuzzyInductor()))
+
+    def test_in_pipeline(self):
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        fi = FuzzyInductor()
+        self.assertNotEqual(fi, 'passthrough')
+        self.assertEqual(fi, FuzzyInductor())
+        model = make_pipeline(StandardScaler(), fi).fit(self.X, self.y)
+        self.assertEqual(len(model.predict(self.X)), len(self.X))
+
+    def test_not_fitted(self):
+        with self.assertRaises(NotFittedError):
+            FuzzyInductor().predict(self.X)
+
+    def test_infeasible(self):
+        y = np.zeros(len(self.y))
+        y[:5] = 1
+        with self.assertRaisesRegex(ValueError, 'infeasible'):
+            FuzzyInductor(c=.1).fit(self.X, y)
+
+    def test_score(self):
+        fi = FuzzyInductor().fit(self.X, self.y)
+        mse = np.mean((fi.predict(self.X) - self.y) ** 2)
+        self.assertAlmostEqual(fi.score(self.X, self.y), -mse)
+
+    def test_pinball_radius(self):
+        fi = FuzzyInductor(c=.5)
+        sq_dist = np.array([1., 2, 3, 4])
+        y = np.array([1, 1, 0, 0])
+        objective = lambda r: r + .5 * sum(
+            m * max(d - r, 0) + (1 - m) * max(r - d, 0)
+            for d, m in zip(sq_dist, y))
+        grid = np.linspace(0, 5, 5001)
+        self.assertAlmostEqual(objective(fi._pinball_sq_radius(sq_dist, y)),
+                               min(map(objective, grid)))
+
+    def test_no_support_vectors(self):
+        X = np.array([[0.], [1.], [2.], [3.]])
+        y = np.array([1, 1, 0, 0])
+        fi = FuzzyInductor(c=.5, k=GaussianKernel(.5),
+                           fuzzifier=CrispFuzzifier())
+        with mock.patch.object(fi, '_pinball_sq_radius',
+                               wraps=fi._pinball_sq_radius) as pinball, \
+             mock.patch('mulearn.optimization.GurobiSolver.solve',
+                        return_value=[.5, .5, 0., 0.]):
+            fi.fit(X, y)
+        pinball.assert_called_once()
+        self.assertTrue(np.all((fi.predict(X) >= 0) & (fi.predict(X) <= 1)))
+
     def test_serialization(self):
         fi = FuzzyInductor()
         fi.fit(self.X, self.y)
@@ -119,15 +173,18 @@ class TestFuzzyInductor(unittest.TestCase):
                   GaussianKernel(.1), HyperbolicKernel()]
         scores = [0.3679416879198661, 0.3954864950288751,
                   3.858380026406454e-08, 0.5]
+        # the hyperbolic Gram matrix is almost rank one, so that the optimal
+        # solution is not unique
+        deltas = [1e-7, 1e-7, 1e-7, 1e-2]
         logging.disable(logging.WARNING)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            for k, s in zip(kernel, scores):
+            for k, s, delta in zip(kernel, scores, deltas):
                 fi = FuzzyInductor(k=k)
                 fi.fit(self.X, self.y)
                 y_hat = fi.predict(self.X)
                 rmse = metrics.root_mean_squared_error(self.y, y_hat)
-                self.assertAlmostEqual(s, rmse)
+                self.assertAlmostEqual(s, rmse, delta=delta)
         logging.disable(logging.NOTSET)
     
     def test_standard_train(self):
