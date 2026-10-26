@@ -102,7 +102,8 @@ class FuzzyInductor(RegressorMixin, BaseEstimator):
             if e < 0 or e > 1:
                 raise ValueError("`y` values should belong to [0, 1]")
 
-        if self.c * np.sum(y) < 1:
+        # tolerance for rounding errors when c = 1 / sum(y)
+        if self.c * np.sum(y) < 1 - 1e-10:
             raise ValueError("the learning problem is infeasible, as "
                              f"c * sum(y) = {self.c * np.sum(y)} < 1: set c "
                              f"to at least {1 / np.sum(y)}")

@@ -131,6 +131,13 @@ class TestFuzzyInductor(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'infeasible'):
             FuzzyInductor(c=.1).fit(self.X, y)
 
+    def test_feasibility_bound(self):
+        rng = np.random.default_rng(0)
+        for _ in range(20):
+            y = rng.uniform(0, 1, len(self.X))
+            fi = FuzzyInductor(c=1 / np.sum(y), k=GaussianKernel(1)).fit(self.X, y)
+            np.testing.assert_allclose(fi.chis_, y / np.sum(y), atol=1e-6)
+
     def test_score(self):
         fi = FuzzyInductor().fit(self.X, self.y)
         mse = np.mean((fi.predict(self.X) - self.y) ** 2)
