@@ -1,12 +1,29 @@
-gurobipy
-ipywidgets
+# Development environment for mulearn: library, tests and notebooks.
+# The library's own runtime dependencies are declared in pyproject.toml.
+#
+# Compile with the oldest supported Python (3.11), so that the pinned
+# versions also install on newer interpreters:
+#
+#    pip-compile --strip-extras requirements.in
+#
+# Lower bounds are the oldest versions the test suite has been run against.
+
+# library
+clarabel>=0.9
+gurobipy>=13,<14
 json_fix
-kaleido
+numpy>=1.24
+scikit-learn>=1.4
+scipy>=1.10
+tqdm
+
+# notebooks
+ipywidgets
 matplotlib
 notebook
-numpy<2.0
 pandas
 plotly
-scikit-learn
-tensorflow==2.17
-tqdm
+
+# TensorFlowSolver does not work with Keras 3 (TensorFlow >= 2.16), hence
+# tensorflow is not part of this environment; install it separately via
+# `pip install mulearn[tensorflow]` once the solver has been ported.
