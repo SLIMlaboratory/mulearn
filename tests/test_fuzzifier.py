@@ -193,9 +193,9 @@ class TestExponentialFuzzifier(BaseTest, unittest.TestCase):
 
     def test_profile(self):
 
-        slopes = (-98.52763209367015,-14.305178809577578,
+        slopes = (-2.3887064381585272, -14.305178809577578,
                   -1.142022483767279, -0.32724662996583)
-        intercepts = (344.1535651472856, 27.17983975471548,
+        intercepts = (7.6673253529949, 27.17983975471548,
                       2.1513025936983423, 0.5563191029720798)
         
         for profile, slope, intercept in zip(['fixed', 'infer', 0.1, 0.4],

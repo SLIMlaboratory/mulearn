@@ -18,6 +18,10 @@ from mulearn.optimization import GurobiSolver
 
 logger = logging.getLogger(__name__)
 
+# relative tolerance (w.r.t. c) used to detect the bounds of the dual
+# variables, in order to identify the unbounded support vectors
+SV_RTOL = 1e-6
+
 warnings.filterwarnings("ignore", category=OptimizeWarning)
 warnings.filterwarnings("ignore", category=FitFailedWarning)
 
@@ -124,8 +128,11 @@ class FuzzyInductor(RegressorMixin, BaseEstimator):
         
         self.chis_ = self.solver.solve(X, y, self.c, self.gram_)
 
+        # numerical solvers return values only approximately equal to the
+        # bounds (e.g., 1e-12 instead of 0), hence the tolerance
+        tol = SV_RTOL * self.c
         chi_SV_index = [i for i, (chi, mu) in enumerate(zip(self.chis_, y))
-                        if -self.c * (1 - mu) < chi < self.c * mu]
+                        if -self.c * (1 - mu) + tol < chi < self.c * mu - tol]
         
         self.fixed_term_ = np.array(self.chis_).dot(self.gram_.dot(self.chis_))
         sq_dist = self.x_to_sq_dist(X)

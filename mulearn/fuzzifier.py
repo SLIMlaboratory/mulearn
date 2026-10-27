@@ -40,6 +40,30 @@ def exp_clip(a):
     return np.where(a > 0, 1, np.exp(a))
 
 
+def _core_guess(squared_R, mu, squared_radius, threshold):
+    """Initial guess for the squared distance at which membership starts
+    decreasing from 1: the median squared distance of the points whose
+    membership is at least `threshold` times the maximal one, moved halfway
+    towards the smallest squared distance (or slightly below
+    `squared_radius`, if all points lie on the sphere) if it is not below
+    `squared_radius`: this happens, e.g., when these points lie on the
+    learnt sphere, and would make the fixed profiles degenerate."""
+    squared_R = np.asarray(squared_R, dtype=float)
+    mu = np.asarray(mu, dtype=float)
+    guess = np.median(squared_R[mu >= max(mu) * threshold])
+    if guess >= squared_radius:
+        lowest = min(min(squared_R), squared_radius * (1 - 1e-3))
+        guess = (lowest + squared_radius) / 2
+    return guess
+
+
+def _core_upper(squared_radius):
+    """Upper bound for the core squared radius in the fixed profiles, which
+    must be strictly smaller than the squared radius of the sphere (otherwise
+    the profile is undefined)."""
+    return squared_radius * (1 - 1e-9)
+
+
 class Fuzzifier:
     """Base class for fuzzifiers.
 
@@ -311,8 +335,7 @@ class LinearFuzzifier(Fuzzifier):
         
         assert len(squared_R) == len(mu)
         
-        r_2_1_guess = np.median([r2 for r2, m in zip (squared_R, mu)
-                                              if m >= max(mu)*0.99])
+        r_2_1_guess = _core_guess(squared_R, mu, squared_radius, 0.99)
         r_2_0_guess = np.median([r2 for r2, m in zip (squared_R, mu)
                                               if m <= min(mu)*1.01])
         r_2_05_guess = (r_2_1_guess + r_2_0_guess) / 2
@@ -326,9 +349,10 @@ class LinearFuzzifier(Fuzzifier):
                 
                 return result
 
+            upper = _core_upper(squared_radius)
             [r_2_1_opt], _ = curve_fit(r2_to_mu, squared_R, mu,
-                                       p0=(r_2_1_guess,),
-                                       bounds=((0,), (np.inf,)))
+                                       p0=(min(max(r_2_1_guess, 0), upper),),
+                                       bounds=((0,), (upper,)))
             self.slope_ = -1 / (2 * (squared_radius - r_2_1_opt))
             self.intercept_ = 1 + r_2_1_opt / (2 * (squared_radius - r_2_1_opt))
         
@@ -456,8 +480,7 @@ class ExponentialFuzzifier(Fuzzifier):
                 raise ValueError("profile must be set to a number between 0 "
                                  "and 1, or either to 'fixed' or 'infer'")
 
-        r_2_1_guess = np.median([r_2 for r_2, m in zip(squared_R, mu)
-                                if m >= max(mu)*0.9])
+        r_2_1_guess = _core_guess(squared_R, mu, squared_radius, 0.9)
         s_guess = np.log(2) / (squared_radius - r_2_1_guess)
 
         if self.profile == "fixed":
@@ -467,9 +490,11 @@ class ExponentialFuzzifier(Fuzzifier):
                         for r_2 in R_2]
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                [r_2_1_opt], _ = curve_fit(r2_to_mu, squared_R, mu,
-                                           p0=(r_2_1_guess,), maxfev=2000,
-                                           bounds=((0,), (np.inf,)))
+                upper = _core_upper(squared_radius)
+                [r_2_1_opt], _ = curve_fit(
+                    r2_to_mu, squared_R, mu,
+                    p0=(min(max(r_2_1_guess, 0), upper),), maxfev=2000,
+                    bounds=((0,), (upper,)))
                 denominator = squared_radius - r_2_1_opt
                 self.slope_ = -np.log(2) / denominator
                 self.intercept_ = r_2_1_opt * np.log(2) / denominator

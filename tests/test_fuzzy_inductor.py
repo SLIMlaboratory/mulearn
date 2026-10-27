@@ -154,6 +154,23 @@ class TestFuzzyInductor(unittest.TestCase):
         self.assertAlmostEqual(objective(fi._pinball_sq_radius(sq_dist, y)),
                                min(map(objective, grid)))
 
+    def test_sq_radius(self):
+        # numerical solvers return dual variables only approximately equal
+        # to the bounds: the squared radius must nonetheless be the squared
+        # distance of the unbounded support vectors, which lie on the sphere
+        from mulearn.optimization import ClarabelSolver, GurobiSolver
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(40, 2))
+        mu = np.clip(rng.uniform(-.3, 1.3, 40), 0, 1)
+        for solver in (ClarabelSolver(), GurobiSolver()):
+            fi = FuzzyInductor(c=1, solver=solver).fit(X, mu)
+            chis = np.array(fi.chis_)
+            sq_dist = fi.x_to_sq_dist(X)
+            free = (chis > -(1 - mu) + 1e-4) & (chis < mu - 1e-4)
+            self.assertGreater(free.sum(), 0)
+            np.testing.assert_allclose(sq_dist[free],
+                                       fi.fuzzifier.sq_radius_05, atol=1e-5)
+
     def test_no_support_vectors(self):
         X = np.array([[0.], [1.], [2.], [3.]])
         y = np.array([1, 1, 0, 0])
@@ -178,8 +195,11 @@ class TestFuzzyInductor(unittest.TestCase):
     def test_fit(self):
         kernel = [LinearKernel(), PolynomialKernel(2),
                   GaussianKernel(.1), HyperbolicKernel()]
-        scores = [0.3679416879198661, 0.3954864950288751,
-                  3.858380026406454e-08, 0.5]
+        # with the narrow Gaussian kernel all positive examples are
+        # unbounded support vectors, thus lying on the learnt sphere, where
+        # the fixed profile assigns membership 1/2: hence RMSE = sqrt(1/12)
+        scores = [0.18015338625478378, 0.19079606373771996,
+                  0.2886751345948285, 0.501304679791567]
         # the hyperbolic Gram matrix is almost rank one, so that the optimal
         # solution is not unique
         deltas = [1e-7, 1e-7, 1e-7, 1e-2]
@@ -208,8 +228,9 @@ class TestFuzzyInductor(unittest.TestCase):
         score = cross_val_score(gs, self.X, self.y,
                                 scoring='neg_root_mean_squared_error',
                                 cv=cv_out)
-        target = np.array([-0.49120162, -0.54772224, -0.54772203,
-                           -0.51639634, -0.47835032])
+        # with these narrow kernels, test points are far from all training
+        # points and get null membership: RMSE = sqrt(1/3) on each fold
+        target = np.full(5, -1 / np.sqrt(3))
 
         for t, s in zip(score, target):
             self.assertAlmostEqual(t, s)
@@ -225,10 +246,9 @@ class TestFuzzyInductor(unittest.TestCase):
                         n_jobs=NUM_CORES, pre_dispatch=2*NUM_CORES)
 
         result = {'configuration': best_conf} | result
-        self.assertAlmostEqual(result['RMSE mean'], 0.5162785111296674,
+        self.assertAlmostEqual(result['RMSE mean'], 1 / np.sqrt(3),
                                delta=1E-5)
-        self.assertAlmostEqual(result['RMSE std'], 0.03179943202573793,
-                               delta=1E-4)
+        self.assertAlmostEqual(result['RMSE std'], 0, delta=1E-4)
 
 if __name__ == '__main__':
     unittest.main()
