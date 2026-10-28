@@ -8,6 +8,8 @@ from unittest import mock
 from sklearn.datasets import load_iris
 
 from mulearn import FuzzyInductor
+from mulearn.kernel import LinearKernel
+from mulearn.optimization import ClarabelSolver
 import mulearn.fuzzifier as fuzz
 
 
@@ -118,10 +120,6 @@ class TestLinearFuzzifier(BaseTest, unittest.TestCase):
         mu = np.array([1, .9, .5, .3, .2, .1])
         self._test_compute(fuzz.LinearFuzzifier(profile='fixed'),
                            squared_R, mu, 2, np.array([1, 0, 0, 0, 0, 0]))
-        target = [0.99763019, 0.99289056, 0.98578113,
-                  0.97156225, 0.91942638, 0.01415807]
-        self._test_compute(fuzz.LinearFuzzifier(profile='triangular'),
-                           squared_R, mu, 2, target)
         target = np.array([0.60031447, 0.59773126, 0.59385645,
                            0.58610684, 0.55769158, 0.06429942])
         self._test_compute(fuzz.LinearFuzzifier(profile='infer'),
@@ -311,6 +309,92 @@ class TestZShapedFuzzifier(SmoothFuzzifierTest, unittest.TestCase):
                         {'class': 'ZShapedFuzzifier', 'profile': profile})
 
 
+class TestTrapezoidalFuzzifier(SmoothFuzzifierTest, unittest.TestCase):
+
+    profiles = ['fixed', 'triangular', 'infer']
+
+    def test_shape(self):
+        trapezoid = fuzz.TrapezoidalFuzzifier._trapezoid
+        r = np.array([0, 1, 4, 6.25, 9, 16])
+        # linear in the distance: 1 up to distance 1, 0 from distance 3
+        np.testing.assert_allclose(trapezoid(r, 1, 9),
+                                   [1, 1, 0.5, 0.25, 0, 0])
+
+    def test_fixed(self):
+        squared_R = np.array([1, 3, 6, 12, 34, 416])
+        mu = np.array([1, .9, .5, .3, .2, .1])
+        f = fuzz.TrapezoidalFuzzifier(profile='fixed').fit(squared_R, mu, 6)
+        self.assertAlmostEqual(f.get_membership([6])[0], 0.5)
+        self.assertTrue(0 <= f.r_1_ < 6 < f.r_0_)
+        self._check_valid(f, squared_R)
+
+    def test_triangular_recovers_parameters(self):
+        squared_R = np.linspace(0, 10, 60)
+        mu = fuzz.TrapezoidalFuzzifier._trapezoid(squared_R, 0, 6)
+        f = fuzz.TrapezoidalFuzzifier(profile='triangular').fit(squared_R,
+                                                                mu, 3)
+        self.assertEqual(f.r_1_, 0)
+        self.assertAlmostEqual(f.r_0_, 6, places=3)
+        self._check_valid(f, squared_R)
+
+    def test_infer_recovers_parameters(self):
+        squared_R = np.linspace(0, 10, 60)
+        mu = fuzz.TrapezoidalFuzzifier._trapezoid(squared_R, 1, 7)
+        f = fuzz.TrapezoidalFuzzifier(profile='infer').fit(squared_R, mu, 4)
+        self.assertAlmostEqual(f.r_1_, 1, places=3)
+        self.assertAlmostEqual(f.r_0_, 7, places=3)
+        self._check_valid(f, squared_R)
+
+    def test_triangular_in_data_space(self):
+        # with a linear kernel, the triangular profile induces a triangular
+        # membership function on unidimensional data
+        X = np.linspace(-3, 3, 61).reshape(-1, 1)
+        y = np.clip(1 - np.abs(X.ravel()) / 2, 0, 1)
+        model = FuzzyInductor(c=1, k=LinearKernel(), solver=ClarabelSolver(),
+                              fuzzifier=fuzz.TrapezoidalFuzzifier(
+                                  'triangular')).fit(X, y)
+        np.testing.assert_allclose(model.predict(X), y, atol=0.05)
+
+    def test_fallback(self):
+        squared_R = np.array([1, 3, 6, 12, 34, 416])
+        mu = np.array([1, .9, .5, .3, .2, .1])
+        fixed = fuzz.TrapezoidalFuzzifier('fixed').fit(squared_R, mu, 6)
+        real_curve_fit = fuzz.curve_fit
+        for profile in ['triangular', 'infer']:
+            calls = []
+
+            def fail_first_call(*args, **kwargs):
+                calls.append(None)
+                if len(calls) == 1:
+                    raise RuntimeError
+                return real_curve_fit(*args, **kwargs)
+
+            f = fuzz.TrapezoidalFuzzifier(profile)
+            with mock.patch.object(fuzz, 'curve_fit', fail_first_call), \
+                 self.assertLogs('mulearn.fuzzifier', level='WARNING'):
+                f.fit(squared_R, mu, 6)
+            self.assertEqual(f.profile, profile)
+            self.assertAlmostEqual(f.r_1_, fixed.r_1_)
+            self.assertAlmostEqual(f.r_0_, fixed.r_0_)
+
+    def test_wrong_profile(self):
+        with self.assertRaises(ValueError):
+            fuzz.TrapezoidalFuzzifier(profile='foo').fit([1, 2], [1, 0], 1.5)
+
+    def test_serialize(self):
+        for profile in self.profiles:
+            self._test_serialize(fuzz.TrapezoidalFuzzifier(profile=profile))
+
+    def test_persist(self):
+        for profile in self.profiles:
+            self._test_persist(fuzz.TrapezoidalFuzzifier(profile=profile))
+
+    def test_json(self):
+        for profile in self.profiles:
+            self._test_json(fuzz.TrapezoidalFuzzifier(profile=profile),
+                        {'class': 'TrapezoidalFuzzifier', 'profile': profile})
+
+
 class TestIsotonicFuzzifier(SmoothFuzzifierTest, unittest.TestCase):
 
     def test_pool_adjacent_violators(self):
@@ -438,7 +522,6 @@ class TestFitFailure(unittest.TestCase):
         real_curve_fit = fuzz.curve_fit
 
         for profile, cls in (('infer', fuzz.LinearFuzzifier),
-                             ('triangular', fuzz.LinearFuzzifier),
                              ('infer', fuzz.ExponentialFuzzifier),
                              (.3, fuzz.ExponentialFuzzifier)):
             fixed = cls('fixed').fit(squared_R, mu, 6)
@@ -470,6 +553,9 @@ class TestNewFuzzifiersInInductor(unittest.TestCase):
                   fuzz.SigmoidFuzzifier('infer'),
                   fuzz.ZShapedFuzzifier('fixed'),
                   fuzz.ZShapedFuzzifier('infer'),
+                  fuzz.TrapezoidalFuzzifier('fixed'),
+                  fuzz.TrapezoidalFuzzifier('triangular'),
+                  fuzz.TrapezoidalFuzzifier('infer'),
                   fuzz.IsotonicFuzzifier()):
             model = FuzzyInductor(c=1, fuzzifier=f).fit(X, y)
             mu = model.predict(X)

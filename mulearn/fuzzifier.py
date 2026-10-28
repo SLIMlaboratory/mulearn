@@ -293,9 +293,8 @@ class LinearFuzzifier(Fuzzifier):
         r"""Create an instance of :class:`LinearFuzzifier`.
         :param profile: method to be used in order to build the fuzzifier
           profile: `'fixed'` relies on the radius of the sphere defining
-          the fuzzy set core, `'triangular'` aims at inducing a triangular or
-          trapezoidal membership function in data space and `'infer'` fits a
-          generic threshold function on the provided examples.
+          the fuzzy set core, and `'infer'` fits a generic threshold function
+          on the provided examples.
         :type profile: str"""
         super().__init__(profile)
 
@@ -311,8 +310,8 @@ class LinearFuzzifier(Fuzzifier):
         :param squared_radius: radius of the fuzzy set in feature space.
         :type squared_radius: float
 
-        :raises: ValueError if self.profile is not set to `'fixed'`,
-          `'triangular`' or `'infer'`.
+        :raises: ValueError if self.profile is not set either to `'fixed'` or
+          to `'infer'`.
 
         The fitting process is done considering a membership function
         linearly decreasing from $1$ to $0$, in turn corresponding to a profile
@@ -338,9 +337,8 @@ class LinearFuzzifier(Fuzzifier):
         r_2_1_guess = _core_guess(squared_R, mu, squared_radius, 0.99)
         r_2_0_guess = np.median([r2 for r2, m in zip (squared_R, mu)
                                               if m <= min(mu)*1.01])
-        r_2_05_guess = (r_2_1_guess + r_2_0_guess) / 2
 
-                                      
+
         if self.profile == 'fixed':
             def r2_to_mu(R_2, r_2_1):
 
@@ -355,27 +353,6 @@ class LinearFuzzifier(Fuzzifier):
                                        bounds=((0,), (upper,)))
             self.slope_ = -1 / (2 * (squared_radius - r_2_1_opt))
             self.intercept_ = 1 + r_2_1_opt / (2 * (squared_radius - r_2_1_opt))
-        
-            
-        elif self.profile == 'triangular':
-            def r2_to_mu(R_2, r_2_05):
-                # TODO: check
-                # return [np.clip(1 - r_2 / (2 * squared_radius),
-                #                 0, 1) - r_2_1
-                #         for r_2 in R_2]
-                return [np.clip(1 - r_2 / (2 * r_2_05),
-                                0, 1)
-                        for r_2 in R_2]
-
-            try:
-                [r_2_05_opt], _ = curve_fit(r2_to_mu, squared_R, mu,
-                                            p0=(r_2_05_guess,),
-                                            bounds=((0,), (np.inf,)))
-                self.slope_ = -1 / (2 * r_2_05_opt)
-                self.intercept_ = 1
-            except RuntimeError:
-                # interpolation could not take place, fall back to fixed profile
-                self._fit_as_fixed(squared_R, mu, squared_radius)
 
         elif self.profile == 'infer':
 
@@ -397,7 +374,7 @@ class LinearFuzzifier(Fuzzifier):
 
         else:
             raise ValueError("'profile' parameter should be equal to "
-                             "'fixed', 'infer' or 'triangular' "
+                             "'fixed' or 'infer' "
                              f"(provided value: {self.profile})")
         if self.slope_ > 0:
             logger.warning('Profile fitting returned a positive slope '
@@ -926,6 +903,136 @@ class ZShapedFuzzifier(Fuzzifier):
     def get_membership(self, R_2):
         check_is_fitted(self, ['r_1_', 'r_0_'])
         return self._z(R_2, self.r_1_, self.r_0_)
+
+
+class TrapezoidalFuzzifier(Fuzzifier):
+    """Trapezoidal fuzzifier.
+
+    Fuzzifier corresponding to a fuzzy set whose membership linearly decreases
+    from 1 to 0 as a function of the distance (rather than of the squared
+    distance, as in :class:`LinearFuzzifier`) from the center of the fuzzy
+    set in feature space. With a linear kernel, for which feature space
+    coincides with data space, it induces trapezoidal (or, when the core
+    reduces to the center, triangular) membership functions: symmetric ones
+    for unidimensional data, and their radial counterparts in higher
+    dimensions."""
+
+    default_profile = "fixed"
+    def __init__(self, profile=default_profile):
+        r"""Create an instance of :class:`TrapezoidalFuzzifier`.
+
+        :param profile: method to be used in order to build the fuzzifier
+          profile: `'fixed'` requires membership to be 0.5 at the squared
+          radius of the learnt sphere and fits the core, `'triangular'`
+          reduces the core to the center of the sphere and fits the support,
+          while `'infer'` fits both the core and the support on the provided
+          examples.
+        :type profile: str"""
+        super().__init__(profile)
+
+    @staticmethod
+    def _trapezoid(R_2, r_1, r_0):
+        d = np.sqrt(np.maximum(np.asarray(R_2, dtype=float), 0))
+        d_1, d_0 = np.sqrt(max(r_1, 0)), np.sqrt(max(r_0, 0))
+        width = max(d_0 - d_1, 1e-12)
+        return np.clip((d_0 - d) / width, 0, 1)
+
+    def fit(self, squared_R, mu, squared_radius):
+        r"""Fit the fuzzifier on training data.
+
+        :param squared_R: iterable of squared distance of the images of vectors
+          in data space w.r.t. the center of the fuzzy set in feature space.
+        :type squared_R: iterable of `float`
+        :param mu: membership degrees of the vectors having originated
+          `squared_R`.
+        :type mu: vector of floats having the same length of `squared_R`
+        :param squared_radius: radius of the fuzzy set in feature space.
+        :type squared_radius: float
+
+        :raises: ValueError if self.profile is not set to `'fixed'`,
+          `'triangular'` or `'infer'`.
+
+        The membership profile equals 1 for $r \leq r_1$, 0 for $r > r_0$,
+        and in between it is
+
+        .. math::
+          p(r) = \frac{\sqrt{r_0} - \sqrt{r}}{\sqrt{r_0} - \sqrt{r_1}}
+          \enspace.
+
+        When `profile` is `'fixed'`, $\sqrt{r_0} = 2 \sqrt{r_{0.5}} -
+        \sqrt{r_1}$, where $r_{0.5}$ is `squared_radius`, so that the profile
+        equals 0.5 at the squared radius of the sphere; when it is
+        `'triangular'`, $r_1 = 0$.
+        """
+
+        self.name = 'Trapezoidal'
+        self.latex_name = '$\\hat\\mu_{\\text{trap}}$'
+
+        assert len(squared_R) == len(mu)
+        squared_R = np.asarray(squared_R, dtype=float)
+        mu = np.asarray(mu, dtype=float)
+
+        d_1_guess = np.sqrt(max(_core_guess(squared_R, mu, squared_radius,
+                                            0.99), 0))
+        d_0_guess = np.sqrt(np.median(squared_R[mu <= min(mu) * 1.01]))
+        if d_0_guess <= d_1_guess:
+            d_0_guess = d_1_guess + max(np.sqrt(np.ptp(squared_R)), 1e-6)
+
+        if self.profile == 'fixed':
+            d_05 = np.sqrt(squared_radius)
+            upper = max(d_05 * (1 - 1e-9), 1e-12)
+            def r2_to_mu(R_2, d_1):
+                return self._trapezoid(R_2, d_1 ** 2, (2 * d_05 - d_1) ** 2)
+
+            try:
+                [d_1_opt], _ = curve_fit(
+                    r2_to_mu, squared_R, mu,
+                    p0=(np.clip(d_1_guess, 0, upper * 0.99),),
+                    bounds=((0,), (upper,)))
+            except RuntimeError:
+                logger.warning('Trapezoidal profile fit failed, using the '
+                               'initial guess')
+                d_1_opt = np.clip(d_1_guess, 0, upper)
+            self.r_1_ = float(d_1_opt ** 2)
+            self.r_0_ = float((2 * d_05 - d_1_opt) ** 2)
+
+        elif self.profile == 'triangular':
+            def r2_to_mu(R_2, d_0):
+                return self._trapezoid(R_2, 0, d_0 ** 2)
+
+            try:
+                [d_0_opt], _ = curve_fit(r2_to_mu, squared_R, mu,
+                                         p0=(d_0_guess,),
+                                         bounds=((1e-12,), (np.inf,)))
+                self.r_1_ = 0.
+                self.r_0_ = float(d_0_opt ** 2)
+            except RuntimeError:
+                self._fit_as_fixed(squared_R, mu, squared_radius)
+
+        elif self.profile == 'infer':
+            def r2_to_mu(R_2, d_1, width):
+                return self._trapezoid(R_2, d_1 ** 2, (d_1 + width) ** 2)
+
+            try:
+                (d_1_opt, w_opt), _ = curve_fit(
+                    r2_to_mu, squared_R, mu,
+                    p0=(d_1_guess, d_0_guess - d_1_guess),
+                    bounds=((0, 1e-12), (np.inf, np.inf)))
+                self.r_1_ = float(d_1_opt ** 2)
+                self.r_0_ = float((d_1_opt + w_opt) ** 2)
+            except RuntimeError:
+                self._fit_as_fixed(squared_R, mu, squared_radius)
+
+        else:
+            raise ValueError("'profile' parameter should be equal to "
+                             "'fixed', 'triangular' or 'infer' "
+                             f"(provided value: {self.profile})")
+
+        return self
+
+    def get_membership(self, R_2):
+        check_is_fitted(self, ['r_1_', 'r_0_'])
+        return self._trapezoid(R_2, self.r_1_, self.r_0_)
 
 
 class IsotonicFuzzifier(Fuzzifier):
