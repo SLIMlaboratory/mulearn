@@ -226,6 +226,59 @@ class GaussianKernel(Kernel):
         return obj_repr
 
 
+class NormalizedLinearKernel(Kernel):
+    """Normalized linear kernel class."""
+
+    default_offset = 1
+
+    def __init__(self, offset=default_offset):
+        r"""Create an instance of `NormalizedLinearKernel`.
+
+        :param offset: value added to the components of the arguments in an
+          additional dimension, defaults to 1.
+        :type offset: `float`
+        :raises: ValueError if `offset` has a negative value.
+        """
+        super().__init__()
+        if offset > 0:
+            self.offset = offset
+        else:
+            raise ValueError(f'{offset} is not usable as an offset')
+
+    def compute(self, arg_1, arg_2):
+        r"""Compute the kernel value.
+
+        The value $k(x_1, x_2)$ of a normalized linear kernel is intended as
+        the quantity $\frac{x_1 \cdot x_2 + s^2}{\sqrt{(||x_1||^2 + s^2)
+        (||x_2||^2 + s^2)}}$, $s$ being the kernel offset. Therefore,
+        $k(x, x) = 1$ for each $x$, so that the squared distance from the
+        center of the sphere is an affine function of the image of $x$, whose
+        level sets are the intersections of a hyperplane with the unit sphere.
+        Given the two arrays of kernels $Y$ and $Z$, the return value will be
+        $(k(y_1,z_1), k(y_2,z_2),..., k(y_m, z_m))$, $m$ being the number of
+        elements in the arrays.
+
+        :param arg_1: First kernel array argument.
+        :type arg_1: Object convertible to np.array
+        :param arg_2: Second kernel array argument.
+        :type arg_2: Object convertible to np.array
+        :returns: `array` -- kernel values.
+        """
+        arg_1, arg_2 = np.atleast_2d(arg_1), np.atleast_2d(arg_2)
+        s_2 = self.offset ** 2
+        return (np.sum(arg_1 * arg_2, axis=1) + s_2) / \
+            np.sqrt((np.sum(arg_1 ** 2, axis=1) + s_2) *
+                    (np.sum(arg_2 ** 2, axis=1) + s_2))
+
+    def __repr__(self):
+        """Return the python representation of the kernel."""
+        obj_repr = "NormalizedLinearKernel("
+        if self.offset != self.default_offset:
+            obj_repr += f"offset={self.offset}"
+        obj_repr += ")"
+        return obj_repr
+
+
 class HyperbolicKernel(Kernel):
     """Hyperbolic kernel class."""
 

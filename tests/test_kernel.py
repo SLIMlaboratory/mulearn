@@ -159,6 +159,43 @@ class TestGaussianKernel(BaseTest, unittest.TestCase):
             self._test_serialize(kernel.GaussianKernel(sigma))
 
 
+class TestNormalizedLinearKernel(BaseTest, unittest.TestCase):
+    def test_compute(self):
+        with self.assertRaises(ValueError):
+            kernel.NormalizedLinearKernel(0)
+
+        k = kernel.NormalizedLinearKernel(1)
+        self.assertAlmostEqual(k.compute(np.array((1, 0)).reshape(1, -1),
+                                         np.array((0, 1)).reshape(1, -1))[0],
+                               0.5)
+        self.assertAlmostEqual(k.compute(np.array((1, 2)).reshape(1, -1),
+                                         np.array((3, 4)).reshape(1, -1))[0],
+                               12 / np.sqrt(6 * 26))
+
+    def test_unit_diagonal(self):
+        X = np.random.default_rng(0).normal(size=(20, 3))
+        for offset in (0.01, 1, 10):
+            k = kernel.NormalizedLinearKernel(offset)
+            np.testing.assert_allclose(k.compute(X, X), 1)
+
+    def test_broadcast(self):
+        X = np.random.default_rng(0).normal(size=(5, 3))
+        k = kernel.NormalizedLinearKernel(0.5)
+        np.testing.assert_allclose(k.compute(X[0], X),
+                                   [k.compute(X[[0]], X[[i]])[0]
+                                    for i in range(5)])
+
+    def test_positive_semidefinite(self):
+        X = np.random.default_rng(0).normal(size=(30, 3))
+        k = kernel.NormalizedLinearKernel(0.3)
+        gram = np.array([k.compute(x, X) for x in X])
+        self.assertGreater(np.linalg.eigvalsh(gram).min(), -1e-10)
+
+    def test_serialize(self):
+        for offset in [0.1, 1]:
+            self._test_serialize(kernel.NormalizedLinearKernel(offset))
+
+
 class TestHyperbolicKernel(BaseTest, unittest.TestCase):
     def test_compute(self):
         k = kernel.HyperbolicKernel(1, 5)
